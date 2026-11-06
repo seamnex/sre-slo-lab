@@ -210,30 +210,59 @@ arrancado a las 01:08 UTC. Cada tiempo sale de restar timestamps: el de la
 inyección, el del estado de la alerta en la API de Prometheus y el de llegada
 del aviso al notificador.
 
-| Escenario | Estado | Pending | Firing | **Notificación** | Canal | Resolución |
-|---|---|---|---|---|---|---|
-| Disponibilidad: 20 % de errores | ✅ completa | 60,2 s | 120,5 s | **119,8 s** | `pager` | 539,3 s después de retirar la falla |
-| Latencia: +350 ms por checkout | ⏳ **en curso** | 79 s | 139 s | **138 s** | `pager` | en curso: esperando el aviso de resolución |
-| Caída total del servicio | ⏳ **en curso** | — | — | — | — | todavía no corrió |
+| Escenario | Pending | Firing | **Notificación** | Canal | Resolución |
+|---|---|---|---|---|---|
+| Disponibilidad: 20 % de errores | 60,2 s | 120,5 s | **119,8 s** | `pager` | 539,3 s (9 min) después de retirar la falla |
+| Latencia: +350 ms por checkout | 78,4 s | 138,7 s | **138,1 s** | `pager` | 1.319,4 s (22 min) |
+| Caída total (`docker compose stop servicio`) | 30,6 s | 88,9 s | **88,7 s** | `pager` | 59,9 s después de levantarlo |
+| *CI — disponibilidad, stack recién levantado* | *30,0 s* | *90,1 s* | ***89,8 s*** | *`pager`* | *no se espera en el CI* |
 
-> **Medición en curso.** La fila de latencia ya tiene medida la detección; la
-> resolución y el escenario de caída total están corriendo. Esta tabla se
-> actualiza cuando terminen.
+La última fila es la prueba de punta a punta que corre en
+[GitHub Actions](https://github.com/seamnex/sre-slo-lab/actions/workflows/validar.yml)
+en cada push, sobre un runner `ubuntu-24.04`.
 
 *La notificación figura unos milisegundos antes que el `firing` porque el
 script consulta el estado cada 2 segundos: el aviso llegó entre dos consultas.*
 
 Lo que confirmó la corrida, más allá de los números:
 
-- **El ruteo por severidad funciona.** Las `page` llegaron al canal `pager`;
-  la `ticket` (ver abajo), al canal `ticket`.
-- **El ticket llegó cuando la falla ya había terminado.** `SLOQuemaLenta` de
-  disponibilidad pasó a `pending` a las 01:12, disparó a los 15 minutos de
-  `for` y el aviso llegó al canal `ticket` a las 01:28:32, **15 minutos después
-  de retirar una falla de 2 minutos**. No es un bug del ruteo: con 4 minutos de
-  historia, la ventana "de 1 día" promedia sobre minutos, y 2 minutos al 20 %
-  pesan como un 3 % sostenido. Es exactamente el escenario 1 de los tests
-  unitarios, que con 3 días de historia verifica que eso **no** pase.
+- **El punto ciego existe, y la alerta que lo cubre funciona.** Con el servicio
+  detenido, durante el minuto y medio de la caída **no disparó ninguna alerta
+  de burn rate**: sin métricas, el SLI da "sin datos". La única notificación fue
+  `SLOSinDatos`, a los 88,7 s. Es el escenario 4 de los tests unitarios,
+  reproducido en vivo.
+- **El ruteo por severidad funciona.** Todas las `page` llegaron al canal
+  `pager` y los dos tickets, al canal `ticket`.
+- **La inhibición funciona.** `SLOQuemaLenta` de latencia ya estaba disparada
+  en Prometheus, pero Alertmanager la retuvo mientras la page rápida del mismo
+  SLO seguía activa. El ticket salió a las 01:47:22, **10 segundos después** de
+  que se resolvió la page (01:47:12): mientras alguien atiende el incidente, no
+  recibe un segundo aviso del mismo problema; cuando se cierra, queda el ticket
+  por el budget consumido.
+- **El ticket de disponibilidad llegó cuando la falla ya había terminado.**
+  `SLOQuemaLenta` pasó a `pending` a las 01:12, disparó tras los 15 minutos de
+  `for` y el aviso llegó a las 01:28:32, **15 minutos después de retirar una
+  falla de 2 minutos**. No es un bug del ruteo: con 4 minutos de historia, la
+  ventana "de 1 día" promedia sobre minutos, y 2 minutos al 20 % pesan como un
+  3 % sostenido. Es exactamente lo que el escenario 1 de los tests unitarios,
+  con 3 días de historia, verifica que **no** pase.
+- **La resolución lenta es el mismo efecto.** 9 y 22 minutos para resolver
+  fallas de 2 minutos: la ventana de 6 h promedia sobre toda la historia del
+  lab, y tarda en diluir la falla. La caída total se resolvió en 60 s porque
+  `SLOSinDatos` no depende de ninguna ventana.
+
+Registro completo del notificador durante la corrida:
+
+```text
+01:13:52  pager   firing    SLOQuemaRapida  disponibilidad
+01:22:52  pager   resolved  SLOQuemaRapida  disponibilidad
+01:25:12  pager   firing    SLOQuemaRapida  latencia
+01:28:32  ticket  firing    SLOQuemaLenta   disponibilidad
+01:47:12  pager   resolved  SLOQuemaRapida  latencia
+01:47:22  ticket  firing    SLOQuemaLenta   latencia
+01:48:44  pager   firing    SLOSinDatos
+01:49:44  pager   resolved  SLOSinDatos
+```
 
 ### Dos bugs que encontré —y que los tests encontraron por mí—
 
