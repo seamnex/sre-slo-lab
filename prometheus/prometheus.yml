@@ -1,0 +1,22 @@
+# Intervalos cortos a propósito: en un lab interesa ver la alerta disparar en
+# minutos. En producción, 15-30 s es lo habitual.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/reglas/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: checkout
+    static_configs:
+      - targets: ["servicio:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

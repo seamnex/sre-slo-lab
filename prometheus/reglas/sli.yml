@@ -1,0 +1,204 @@
+# Reglas de grabación de los SLIs.
+#
+# Cada SLI se precalcula en todas las ventanas que usan las alertas de burn
+# rate y el dashboard. Dos motivos:
+#   1. Rendimiento: rate() sobre 3 días o 30 días, evaluado cada 30 segundos
+#      por varias alertas, es caro. Precalculado, se evalúa una sola vez.
+#   2. Una sola definición: alertas y dashboard leen la misma serie. Si el
+#      SLI cambia, cambia en un solo lugar y no pueden contradecirse.
+#
+# Convención de nombres de Prometheus: nivel:métrica:operación.
+# Las series valen la FRACCIÓN DE EVENTOS MALOS (0 = perfecto), que es lo que
+# consume error budget y lo que comparan las alertas.
+
+groups:
+  - name: slo-objetivos
+    rules:
+      # Los objetivos también son series: el dashboard los lee de acá en vez
+      # de tenerlos escritos a mano en cada panel.
+      - record: slo:objetivo:ratio
+        expr: vector(0.995)
+        labels:
+          slo: disponibilidad
+      - record: slo:objetivo:ratio
+        expr: vector(0.99)
+        labels:
+          slo: latencia
+
+  - name: sli-disponibilidad
+    # El "or vector(0)" del numerador no es decorativo. Un servicio que nunca
+    # devolvió un 5xx no tiene la serie code="500": sin el or, el numerador da
+    # vacío, el SLI da "sin datos" en vez de 0, y el error budget desaparece
+    # del dashboard justo cuando todo está sano. Si no hay tráfico, el
+    # denominador sigue vacío y el SLI también: ahí "sin datos" es correcto.
+    rules:
+      # Fracción de checkouts que fallaron con 5xx en 5m.
+      - record: slo:sli_errores:ratio_rate5m
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[5m])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[5m]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 30m.
+      - record: slo:sli_errores:ratio_rate30m
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[30m])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[30m]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 1h.
+      - record: slo:sli_errores:ratio_rate1h
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[1h])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[1h]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 2h.
+      - record: slo:sli_errores:ratio_rate2h
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[2h])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[2h]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 6h.
+      - record: slo:sli_errores:ratio_rate6h
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[6h])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[6h]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 1d.
+      - record: slo:sli_errores:ratio_rate1d
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[1d])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[1d]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 3d.
+      - record: slo:sli_errores:ratio_rate3d
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[3d])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[3d]))
+        labels:
+          slo: disponibilidad
+      # Fracción de checkouts que fallaron con 5xx en 30d.
+      - record: slo:sli_errores:ratio_rate30d
+        expr: |
+          (sum(rate(http_requests_total{job="checkout",route="/api/checkout",code=~"5.."}[30d])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="checkout",route="/api/checkout"}[30d]))
+        labels:
+          slo: disponibilidad
+
+  - name: sli-latencia
+    rules:
+      # Fracción de checkouts que tardaron más de 300 ms en 5m.
+      - record: slo:sli_errores:ratio_rate5m
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[5m]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[5m]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 30m.
+      - record: slo:sli_errores:ratio_rate30m
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[30m]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[30m]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 1h.
+      - record: slo:sli_errores:ratio_rate1h
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[1h]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[1h]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 2h.
+      - record: slo:sli_errores:ratio_rate2h
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[2h]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[2h]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 6h.
+      - record: slo:sli_errores:ratio_rate6h
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[6h]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[6h]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 1d.
+      - record: slo:sli_errores:ratio_rate1d
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[1d]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[1d]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 3d.
+      - record: slo:sli_errores:ratio_rate3d
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[3d]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[3d]))
+          )
+        labels:
+          slo: latencia
+      # Fracción de checkouts que tardaron más de 300 ms en 30d.
+      - record: slo:sli_errores:ratio_rate30d
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="checkout",route="/api/checkout",le="0.3"}[30d]))
+            /
+            sum(rate(http_request_duration_seconds_count{job="checkout",route="/api/checkout"}[30d]))
+          )
+        labels:
+          slo: latencia
+
+  - name: error-budget
+    rules:
+      # Error budget restante en la ventana del SLO (30 días): 1 = intacto,
+      # 0 = agotado, negativo = SLO incumplido.
+      - record: slo:error_budget_restante:ratio
+        expr: |
+          1 - (
+            slo:sli_errores:ratio_rate30d
+            /
+            on(slo) (1 - slo:objetivo:ratio)
+          )
+
+      # Burn rate: a qué velocidad se consume el budget. 1 = se agota justo
+      # al final de los 30 días; 14,4 = se agota en ~2 días.
+      - record: slo:burn_rate:ratio_rate1h
+        expr: slo:sli_errores:ratio_rate1h / on(slo) (1 - slo:objetivo:ratio)
+      - record: slo:burn_rate:ratio_rate5m
+        expr: slo:sli_errores:ratio_rate5m / on(slo) (1 - slo:objetivo:ratio)
+      - record: slo:burn_rate:ratio_rate6h
+        expr: slo:sli_errores:ratio_rate6h / on(slo) (1 - slo:objetivo:ratio)
+      - record: slo:burn_rate:ratio_rate30m
+        expr: slo:sli_errores:ratio_rate30m / on(slo) (1 - slo:objetivo:ratio)

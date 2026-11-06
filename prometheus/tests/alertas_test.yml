@@ -1,0 +1,204 @@
+# Tests unitarios de las alertas, con promtool:
+#
+#   promtool test rules prometheus/tests/alertas_test.yml
+#
+# Cada caso arma series sintéticas minuto a minuto y verifica que la alerta
+# dispare —o NO dispare— en un momento exacto. Es la única forma de probar una
+# alerta de 3 días sin esperar 3 días.
+#
+# Tráfico de referencia: 600 checkouts por minuto (10 req/s). Cada escenario
+# arranca con 7 horas limpias, para que las ventanas de 1h y 6h tengan
+# historia completa como en producción. Sin esa historia, la ventana "larga"
+# promedia sobre pocos minutos y la alerta dispara antes de lo que lo haría en
+# un sistema real: el test estaría aprobando un comportamiento que no existe.
+
+rule_files:
+  - ../reglas/sli.yml
+  - ../reglas/alertas.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ───────────────────────────────────────────────────────────────────────
+  # 1. Disponibilidad: 20 % de errores después de 3 días limpios.
+  #    Burn rate 40x. La ventana de 1 h supera 14,4x (7,2 % de errores) a
+  #    los ~22 min de falla, y la alerta tiene for: 1m.
+  #
+  #    Este escenario necesita 3 días de historia y no 7 horas: con poca
+  #    historia, la ventana "de 3 días" promedia sobre lo que hay, 30 minutos
+  #    de falla pesan como 1,3 % en vez de 0,14 %, y la quema LENTA también
+  #    dispara. La primera versión de este test lo encontró.
+  # ───────────────────────────────────────────────────────────────────────
+  - name: quema rápida de disponibilidad
+    interval: 1m
+    input_series:
+      - series: 'up{job="checkout", instance="servicio:8080"}'
+        values: '1x4400'
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="200"}'
+        values: '0+600x4320 2592480+480x80'
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="500"}'
+        values: '0x4320 120+120x80'
+
+    alert_rule_test:
+      # Antes de la falla: nada.
+      - eval_time: 4319m
+        alertname: SLOQuemaRapida
+        exp_alerts: []
+      # 15 min de falla: la ventana de 5 min ya grita, la de 1 h todavía no.
+      # Es la ventana larga haciendo su trabajo: un pico corto no despierta a nadie.
+      - eval_time: 4335m
+        alertname: SLOQuemaRapida
+        exp_alerts: []
+      # 30 min de falla: dispara. El valor es 10,02 % y no 10 % exacto porque rate()
+      # extrapola en los bordes de la ventana.
+      - eval_time: 4350m
+        alertname: SLOQuemaRapida
+        exp_alerts:
+          - exp_labels:
+              alertname: SLOQuemaRapida
+              severity: page
+              slo: disponibilidad
+            exp_annotations:
+              summary: "SLO de disponibilidad: el error budget se está quemando rápido"
+              description: "La fracción de checkouts malos (disponibilidad) es 10.02% en la ventana larga. A este ritmo el error budget de 30 días se agota en días, no en semanas."
+              runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/quema-de-error-budget.md
+      # Con 3 días de historia, la quema lenta no dispara: 30 minutos de falla
+      # son el 0,14 % de la ventana de 3 días.
+      - eval_time: 4350m
+        alertname: SLOQuemaLenta
+        exp_alerts: []
+
+  # ───────────────────────────────────────────────────────────────────────
+  # 2. Disponibilidad: 1 % de errores sostenido. Burn rate 2x.
+  #    Demasiado lento para despertar a alguien; suficiente para un ticket.
+  # ───────────────────────────────────────────────────────────────────────
+  - name: quema lenta de disponibilidad
+    interval: 5m
+    input_series:
+      - series: 'up{job="checkout", instance="servicio:8080"}'
+        values: '1x100'
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="200"}'
+        values: '0+2970x100'
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="500"}'
+        values: '0+30x100'
+
+    alert_rule_test:
+      - eval_time: 6h
+        alertname: SLOQuemaRapida
+        exp_alerts: []
+      - eval_time: 6h
+        alertname: SLOQuemaLenta
+        exp_alerts:
+          - exp_labels:
+              alertname: SLOQuemaLenta
+              severity: ticket
+              slo: disponibilidad
+            exp_annotations:
+              summary: "SLO de disponibilidad: consumo sostenido del error budget"
+              description: "Degradación lenta pero constante (1% en la ventana larga). No requiere despertar a nadie, pero sí un ticket: si sigue así, el SLO no se cumple este mes."
+              runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/quema-de-error-budget.md
+
+  # ───────────────────────────────────────────────────────────────────────
+  # 3. Latencia: 30 % de los checkouts pasa a tardar más de 300 ms.
+  #    Burn rate 30x sobre un budget de 1 %. La disponibilidad sigue perfecta:
+  #    la alerta tiene que distinguir QUÉ SLO se está quemando.
+  # ───────────────────────────────────────────────────────────────────────
+  - name: quema rápida de latencia
+    interval: 1m
+    input_series:
+      - series: 'up{job="checkout", instance="servicio:8080"}'
+        values: '1x500'
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="200"}'
+        values: '0+600x500'
+      - series: 'http_request_duration_seconds_count{job="checkout", route="/api/checkout"}'
+        values: '0+600x500'
+      # Pedidos de menos de 300 ms: todos hasta el minuto 420, después el 70 %.
+      - series: 'http_request_duration_seconds_bucket{job="checkout", route="/api/checkout", le="0.3"}'
+        values: '0+600x420 252420+420x80'
+
+    alert_rule_test:
+      - eval_time: 440m
+        alertname: SLOQuemaRapida
+        exp_alerts: []
+      - eval_time: 460m
+        alertname: SLOQuemaRapida
+        exp_alerts:
+          - exp_labels:
+              alertname: SLOQuemaRapida
+              severity: page
+              slo: latencia
+            exp_annotations:
+              summary: "SLO de latencia: el error budget se está quemando rápido"
+              description: "La fracción de checkouts malos (latencia) es 20.34% en la ventana larga. A este ritmo el error budget de 30 días se agota en días, no en semanas."
+              runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/quema-de-error-budget.md
+
+  # ───────────────────────────────────────────────────────────────────────
+  # 4. El punto ciego: el servicio se cae entero.
+  #    Sin métricas, el ratio de errores no da 100 %: da "sin datos". Las
+  #    alertas de burn rate NO disparan, y por eso existe SLOSinDatos.
+  # ───────────────────────────────────────────────────────────────────────
+  - name: servicio caído sin métricas
+    interval: 1m
+    input_series:
+      # Arriba 10 minutos, después el scrape falla.
+      - series: 'up{job="checkout", instance="servicio:8080"}'
+        values: '1x10 0x20'
+      # Los contadores dejan de existir cuando el scrape falla.
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="200"}'
+        values: '0+600x10 _x20'
+
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SLOQuemaRapida
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SLOSinDatos
+        exp_alerts:
+          - exp_labels:
+              alertname: SLOSinDatos
+              severity: page
+              job: checkout
+              instance: servicio:8080
+            exp_annotations:
+              summary: "Checkout sin métricas: los SLOs no se están midiendo"
+              description: "Prometheus no puede scrapear el servicio de checkout. Mientras dure, las alertas de burn rate están ciegas: la ausencia de alertas NO significa que el servicio esté bien."
+              runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/servicio-sin-metricas.md
+
+  - name: target que nunca existió
+    interval: 1m
+    input_series:
+      - series: 'up{job="otro"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SLOSinDatos
+        exp_alerts:
+          - exp_labels:
+              alertname: SLOSinDatos
+              severity: page
+              job: checkout
+            exp_annotations:
+              summary: "Checkout sin métricas: los SLOs no se están midiendo"
+              description: "Prometheus no puede scrapear el servicio de checkout. Mientras dure, las alertas de burn rate están ciegas: la ausencia de alertas NO significa que el servicio esté bien."
+              runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/servicio-sin-metricas.md
+
+  # ───────────────────────────────────────────────────────────────────────
+  # 5. Un servicio que nunca falló no tiene la serie code="500". El SLI de
+  #    disponibilidad tiene que valer 0 (perfecto), no "sin datos".
+  # ───────────────────────────────────────────────────────────────────────
+  - name: SLI sin errores vale cero, no vacío
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="checkout", route="/api/checkout", code="200"}'
+        values: '0+600x30'
+    promql_expr_test:
+      - expr: slo:sli_errores:ratio_rate5m{slo="disponibilidad"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'slo:sli_errores:ratio_rate5m{slo="disponibilidad"}'
+            value: 0
+      - expr: slo:error_budget_restante:ratio{slo="disponibilidad"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'slo:error_budget_restante:ratio{slo="disponibilidad"}'
+            value: 1

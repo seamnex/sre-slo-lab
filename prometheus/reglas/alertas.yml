@@ -1,0 +1,96 @@
+# Alertas por burn rate, multiventana (Google SRE Workbook, cap. 5).
+#
+# La pregunta que contesta cada alerta no es "¿hay errores?" sino "¿a este
+# ritmo, el error budget de 30 días se agota antes de tiempo?". Un 2 % de
+# errores durante 5 minutos no es lo mismo que un 2 % sostenido durante 6 horas,
+# y una alerta de umbral fijo no los distingue.
+#
+# Cada condición combina una ventana LARGA y una CORTA:
+#   - la larga evita disparar por un pico de un minuto (precisión);
+#   - la corta hace que la alerta se apague apenas el problema termina, en vez
+#     de quedar encendida una hora más arrastrada por el promedio (reset rápido).
+#
+#   Severidad  Burn rate  Ventanas      Budget consumido al disparar  Agota el budget en
+#   page       14,4x      1h  y 5m      2 %                           ~2 días
+#   page       6x         6h  y 30m     5 %                           ~5 días
+#   ticket     3x         1d  y 2h      10 %                          ~10 días
+#   ticket     1x         3d  y 6h      10 %                          30 días
+#
+# Las reglas son genéricas: se evalúan para los dos SLOs (disponibilidad y
+# latencia) a la vez, cada uno contra su propio objetivo. El label `slo` de la
+# alerta dice cuál se está quemando.
+
+groups:
+  - name: slo-burn-rate
+    rules:
+      - alert: SLOQuemaRapida
+        expr: |
+          (
+              slo:sli_errores:ratio_rate1h  > on(slo) (14.4 * (1 - slo:objetivo:ratio))
+            and
+              slo:sli_errores:ratio_rate5m  > on(slo) (14.4 * (1 - slo:objetivo:ratio))
+          )
+          or
+          (
+              slo:sli_errores:ratio_rate6h  > on(slo) (6 * (1 - slo:objetivo:ratio))
+            and
+              slo:sli_errores:ratio_rate30m > on(slo) (6 * (1 - slo:objetivo:ratio))
+          )
+        # Dos evaluaciones seguidas como mínimo: con scrape cada 10 s, un
+        # scrape perdido no alcanza para despertar a nadie.
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "SLO de {{ $labels.slo }}: el error budget se está quemando rápido"
+          description: >-
+            La fracción de checkouts malos ({{ $labels.slo }}) es
+            {{ $value | humanizePercentage }} en la ventana larga. A este ritmo el
+            error budget de 30 días se agota en días, no en semanas.
+          runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/quema-de-error-budget.md
+
+      - alert: SLOQuemaLenta
+        expr: |
+          (
+              slo:sli_errores:ratio_rate1d  > on(slo) (3 * (1 - slo:objetivo:ratio))
+            and
+              slo:sli_errores:ratio_rate2h  > on(slo) (3 * (1 - slo:objetivo:ratio))
+          )
+          or
+          (
+              slo:sli_errores:ratio_rate3d  > on(slo) (1 * (1 - slo:objetivo:ratio))
+            and
+              slo:sli_errores:ratio_rate6h  > on(slo) (1 * (1 - slo:objetivo:ratio))
+          )
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "SLO de {{ $labels.slo }}: consumo sostenido del error budget"
+          description: >-
+            Degradación lenta pero constante ({{ $value | humanizePercentage }} en
+            la ventana larga). No requiere despertar a nadie, pero sí un ticket:
+            si sigue así, el SLO no se cumple este mes.
+          runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/quema-de-error-budget.md
+
+  - name: slo-punto-ciego
+    rules:
+      # El punto ciego de todo lo anterior: si el servicio se cae entero, no
+      # hay métricas, el ratio de errores da "sin datos" en vez de 100 %, y
+      # NINGUNA alerta de burn rate dispara. La peor caída posible sería la
+      # única que no avisa.
+      - alert: SLOSinDatos
+        expr: |
+          up{job="checkout"} == 0
+          or
+          absent(up{job="checkout"})
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Checkout sin métricas: los SLOs no se están midiendo"
+          description: >-
+            Prometheus no puede scrapear el servicio de checkout. Mientras dure,
+            las alertas de burn rate están ciegas: la ausencia de alertas NO
+            significa que el servicio esté bien.
+          runbook_url: https://github.com/seamnex/incident-postmortems/blob/main/runbooks/es/servicio-sin-metricas.md

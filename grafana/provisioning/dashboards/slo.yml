@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: slo
+    folder: SRE
+    type: file
+    # El JSON del repo es la fuente de verdad: los cambios hechos en la UI no
+    # se guardan. Para cambiar el dashboard, se exporta y se commitea.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

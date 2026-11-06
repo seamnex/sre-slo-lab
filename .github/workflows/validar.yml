@@ -1,0 +1,137 @@
+# Valida la configuración de SLOs y alertas en cada push y PR a main.
+#
+# Dos capas, porque atrapan cosas distintas:
+#
+#   estatica   promtool valida la sintaxis de las reglas y corre los tests
+#              unitarios de las alertas; amtool valida el ruteo; el dashboard
+#              se valida como JSON y contra los datasources provisionados.
+#
+#   punta a    Levanta el stack completo, inyecta 20 % de errores y espera a
+#   punta      que el aviso llegue al notificador por el canal de page. Es la
+#              única prueba de que la cadena entera —métrica, regla, alerta,
+#              ruteo, webhook— funciona junta, y no solo cada pieza por separado.
+
+name: validar
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: validar-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Mismas imágenes (y digests) que docker-compose.yml: las herramientas que
+  # validan son las mismas que después ejecutan la configuración.
+  PROMETHEUS: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+  ALERTMANAGER: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+
+jobs:
+  estatica:
+    name: Reglas, tests de alertas y dashboard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: promtool check config
+        # Montado en las mismas rutas que en el compose, para que los
+        # rule_files del prometheus.yml resuelvan igual que en el lab.
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/prometheus/reglas:/etc/prometheus/reglas:ro" \
+            "$PROMETHEUS" check config /etc/prometheus/prometheus.yml
+
+      - name: promtool test rules
+        # Los tests verifican que cada alerta dispare —o no— en un minuto
+        # exacto. Un cambio en una ventana o un umbral que rompa ese
+        # comportamiento falla acá, no en el próximo incidente.
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/prometheus:/p:ro" -w /p/tests \
+            "$PROMETHEUS" test rules alertas_test.yml
+
+      - name: amtool check-config
+        run: |
+          docker run --rm --entrypoint amtool \
+            -v "$PWD/alertmanager:/a:ro" \
+            "$ALERTMANAGER" check-config /a/alertmanager.yml
+
+      - name: Ruteo de Alertmanager
+        # Que la config sea válida no dice que una alerta de page llegue al
+        # pager. amtool lo verifica sin levantar nada.
+        run: |
+          probar() {
+            obtenido="$(docker run --rm --entrypoint amtool -v "$PWD/alertmanager:/a:ro" \
+              "$ALERTMANAGER" config routes test --config.file=/a/alertmanager.yml "$1")"
+            echo "$1 -> ${obtenido}"
+            [ "${obtenido}" = "$2" ]
+          }
+          probar 'severity=page' pager
+          probar 'severity=ticket' ticket
+          probar 'severity=desconocida' ticket
+
+      - name: Dashboard de Grafana
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("grafana/dashboards/slo.json", encoding="utf-8"))
+          uids = {"prometheus"}  # datasources provisionados
+          errores = []
+          for p in d["panels"]:
+              for t in p.get("targets", []):
+                  uid = t.get("datasource", {}).get("uid")
+                  if uid not in uids:
+                      errores.append(f"panel '{p['title']}': datasource '{uid}' no provisionado")
+                  if not t.get("expr"):
+                      errores.append(f"panel '{p['title']}': target sin consulta")
+          if d.get("id") is not None:
+              errores.append("el dashboard exportado no debe llevar id (rompe la importación en otro Grafana)")
+          print(f"{len(d['panels'])} paneles revisados")
+          sys.exit("\n".join(errores) if errores else 0)
+          PY
+
+  punta-a-punta:
+    name: Falla inyectada -> notificación
+    needs: estatica
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Levantar el stack
+        run: |
+          docker compose up -d --build --wait --wait-timeout 180
+          docker compose ps
+
+      - name: Esperar tráfico y SLIs
+        # Sin un par de minutos de historia, rate() no tiene con qué calcular.
+        run: |
+          for _ in $(seq 1 30); do
+            n="$(curl -s 'http://localhost:9090/api/v1/query?query=slo:sli_errores:ratio_rate5m' \
+                 | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["data"]["result"]))')"
+            echo "series de SLI: ${n}"
+            [ "${n}" = "2" ] && exit 0
+            sleep 10
+          done
+          exit 1
+
+      - name: Inyectar 20 % de errores y esperar el page
+        run: python3 scripts/medir_deteccion.py disponibilidad --limite 600 --sin-resolucion
+
+      - name: Logs del stack
+        if: always()
+        run: docker compose logs --no-color --tail 50 servicio notificador alertmanager prometheus
+
+      - name: Bajar el stack
+        if: always()
+        run: docker compose down -v
